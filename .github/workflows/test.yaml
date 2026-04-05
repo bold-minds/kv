@@ -53,5 +53,13 @@ jobs:
         if: runner.os == 'Windows'
         run: go test -v -coverprofile="coverage.out" ./...
 
-      - name: Run benchmarks
-        run: go test -bench=. -benchmem ./...
+      # Benchmarks as a CI smoke test: -benchtime=1x pins b.N = 1 for
+      # every benchmark, so each runs exactly once. This verifies that
+      # the benchmarks compile and don't panic without actually timing
+      # anything. Real performance measurements belong on a dev machine,
+      # not on shared CI runners — kv has several benchmarks that rebuild
+      # a 100k-entry map inside each iteration (PickInPlace, OmitInPlace,
+      # FilterInPlace using the StopTimer/StartTimer pattern), which
+      # produced 12+ minute CI runs at full benchtime.
+      - name: Run benchmarks (smoke test)
+        run: go test -bench=. -benchtime=1x -benchmem ./...
