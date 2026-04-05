@@ -18,8 +18,15 @@ linters:
         main:
           files:
             - $all
+            - "!$test"
           allow:
             - $gostd
+        tests:
+          files:
+            - $test
+          allow:
+            - $gostd
+            - github.com/bold-minds/kv
     errcheck:
       check-type-assertions: true
     govet:

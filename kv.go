@@ -1,9 +1,17 @@
 // Package kv provides ergonomic operations on typed Go maps:
-// pick/omit/invert keys, merge, sort keys with type-aware comparison,
-// filter, and extract values with caller-supplied defaults.
+// pick/omit/invert keys, merge, sort keys, filter, and extract values
+// with caller-supplied defaults.
 //
-// This package intentionally does not depend on any other bold-minds
-// library. It operates on typed map[K]V — not on the heterogeneous
+// Every function operates directly on typed map[K]V — no type-erased
+// bridge, no reflection except where explicitly needed for non-
+// comparable value equality (OmitValues), no hidden allocations for
+// boxing K/V into any.
+//
+// Immutable by default. Each function returns a new map or slice and
+// leaves its input untouched. Where in-place mutation is worth the
+// ergonomic cost, it is exposed as an explicit *InPlace variant.
+//
+// This package operates on typed map[K]V — not on the heterogeneous
 // any-trees produced by json.Unmarshal. For nested data navigation
 // through map[string]any / map[any]any / []any, see bold-minds/dig.
 // For type coercion at extracted values, chain with bold-minds/to.
@@ -11,443 +19,92 @@ package kv
 
 import (
 	"cmp"
-	"fmt"
+	"reflect"
 	"slices"
 )
 
-// MapOption is an operation applied to a map during NewMap or
-// MutateMap. Options are applied in order.
-type MapOption interface {
-	Apply(m map[any]any) map[any]any
-}
+// =============================================================================
+// Map-shape operations (immutable — return a new map)
+// =============================================================================
 
-// KeysOption is an operation applied to a list of keys during GetKeys.
-// Options receive both the key list and the source map (for filters
-// that need to inspect values) and return the transformed key list.
-type KeysOption interface {
-	Apply(m map[any]any, keys []any) []any
-}
-
-// compareAny returns -1/0/+1 for a<b / a==b / a>b using type-aware
-// comparison. When both operands share a supported ordered type —
-// string, any integer type, any float type, or bool — the natural
-// ordering for that type is used. When the types differ or are
-// unsupported, the comparison falls back to the lexicographic order
-// of their fmt.Sprintf("%v", ...) representation so the sort remains
-// deterministic.
+// Pick returns a new map containing only the entries whose keys appear
+// in keys. Keys that are not present in m are skipped silently.
 //
-// This replaces an earlier string(rune(val)) approach which produced
-// nonsense ordering for integers (sorting by unicode codepoint of the
-// lowest byte instead of numeric value).
-func compareAny(a, b any) int {
-	switch av := a.(type) {
-	case string:
-		if bv, ok := b.(string); ok {
-			return cmp.Compare(av, bv)
-		}
-	case int:
-		if bv, ok := b.(int); ok {
-			return cmp.Compare(av, bv)
-		}
-	case int8:
-		if bv, ok := b.(int8); ok {
-			return cmp.Compare(av, bv)
-		}
-	case int16:
-		if bv, ok := b.(int16); ok {
-			return cmp.Compare(av, bv)
-		}
-	case int32:
-		if bv, ok := b.(int32); ok {
-			return cmp.Compare(av, bv)
-		}
-	case int64:
-		if bv, ok := b.(int64); ok {
-			return cmp.Compare(av, bv)
-		}
-	case uint:
-		if bv, ok := b.(uint); ok {
-			return cmp.Compare(av, bv)
-		}
-	case uint8:
-		if bv, ok := b.(uint8); ok {
-			return cmp.Compare(av, bv)
-		}
-	case uint16:
-		if bv, ok := b.(uint16); ok {
-			return cmp.Compare(av, bv)
-		}
-	case uint32:
-		if bv, ok := b.(uint32); ok {
-			return cmp.Compare(av, bv)
-		}
-	case uint64:
-		if bv, ok := b.(uint64); ok {
-			return cmp.Compare(av, bv)
-		}
-	case float32:
-		if bv, ok := b.(float32); ok {
-			return cmp.Compare(av, bv)
-		}
-	case float64:
-		if bv, ok := b.(float64); ok {
-			return cmp.Compare(av, bv)
-		}
-	case bool:
-		if bv, ok := b.(bool); ok {
-			switch {
-			case av == bv:
-				return 0
-			case !av:
-				return -1
-			default:
-				return 1
-			}
-		}
-	}
-	// Mixed or unsupported types: stable deterministic fallback.
-	return cmp.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
-}
-
-// =============================================================================
-// NewMap
-// =============================================================================
-
-// NewMap creates a new map with the specified options applied.
-func NewMap[K comparable, V any](m map[K]V, opts ...MapOption) map[K]V {
-	// Convert to any map for processing
-	anyMap := make(map[any]any)
-	for k, v := range m {
-		anyMap[any(k)] = any(v)
-	}
-
-	// Check if recursive flag is present
-	recursive := false
-	for _, opt := range opts {
-		if _, isRecursive := opt.(recursiveOption[K, V]); isRecursive {
-			recursive = true
-			break
-		}
-	}
-
-	// Apply each option in sequence with recursive context
-	for _, opt := range opts {
-		if _, isRecursive := opt.(recursiveOption[K, V]); !isRecursive {
-			anyMap = applyWithRecursive(opt, anyMap, recursive)
-		}
-	}
-
-	// Convert back to typed map
-	result := make(map[K]V)
-	for k, v := range anyMap {
-		if key, ok := k.(K); ok {
-			if val, ok := v.(V); ok {
-				result[key] = val
-			}
-		}
-	}
-
-	return result
-}
-
-
-// PickKeys keeps only the specified keys
-func PickKeys[K comparable](keys ...K) MapOption {
-	return pickKeysOption[K]{keys: keys}
-}
-
-type pickKeysOption[K comparable] struct {
-	keys []K
-}
-
-func (o pickKeysOption[K]) Apply(m map[any]any) map[any]any {
-	result := make(map[any]any)
-	for _, key := range o.keys {
-		if val, exists := m[any(key)]; exists {
-			result[any(key)] = val
-		}
-	}
-	return result
-}
-
-// OmitKeys removes the specified keys
-func OmitKeys[K comparable](keys ...K) MapOption {
-	return omitKeysOption[K]{keys: keys}
-}
-
-type omitKeysOption[K comparable] struct {
-	keys []K
-}
-
-func (o omitKeysOption[K]) Apply(m map[any]any) map[any]any {
-	excluded := make(map[any]bool)
-	for _, key := range o.keys {
-		excluded[any(key)] = true
-	}
-
-	result := make(map[any]any)
-	for k, v := range m {
-		if !excluded[k] {
+// The order in which keys are supplied has no effect on the returned
+// map's iteration order — Go maps are unordered.
+func Pick[K comparable, V any](m map[K]V, keys ...K) map[K]V {
+	result := make(map[K]V, len(keys))
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
 			result[k] = v
 		}
 	}
 	return result
 }
 
-// OmitValues removes entries with the specified values
-func OmitValues[K comparable](values ...K) MapOption {
-	return omitValuesOption[K]{values: values}
-}
-
-type omitValuesOption[K comparable] struct {
-	values []K
-}
-
-func (o omitValuesOption[K]) Apply(m map[any]any) map[any]any {
-	excluded := make(map[any]bool)
-	for _, value := range o.values {
-		excluded[any(value)] = true
+// Omit returns a new map with the specified keys removed. Keys not
+// present in m have no effect.
+func Omit[K comparable, V any](m map[K]V, keys ...K) map[K]V {
+	if len(keys) == 0 {
+		return clone(m)
 	}
-
-	result := make(map[any]any)
+	excluded := make(map[K]struct{}, len(keys))
+	for _, k := range keys {
+		excluded[k] = struct{}{}
+	}
+	result := make(map[K]V, len(m))
 	for k, v := range m {
-		if !excluded[v] {
+		if _, drop := excluded[k]; !drop {
 			result[k] = v
 		}
 	}
 	return result
 }
 
-// Invert swaps keys and values
-func Invert[K, V comparable]() MapOption {
-	return invertOption[K, V]{}
+// OmitValues returns a new map with entries removed whose value equals
+// any of the supplied values under reflect.DeepEqual. DeepEqual is used
+// (rather than ==) so that V may legally include non-comparable types
+// such as slices, maps, or structs containing them. The cost is
+// O(len(m) × len(values)); for large maps with many exclusions, prefer
+// Filter with a purpose-built predicate.
+func OmitValues[K comparable, V any](m map[K]V, values ...V) map[K]V {
+	if len(values) == 0 {
+		return clone(m)
+	}
+	result := make(map[K]V, len(m))
+entries:
+	for k, v := range m {
+		for _, excluded := range values {
+			if reflect.DeepEqual(v, excluded) {
+				continue entries
+			}
+		}
+		result[k] = v
+	}
+	return result
 }
 
-type invertOption[K, V comparable] struct{}
-
-func (o invertOption[K, V]) Apply(m map[any]any) map[any]any {
-	result := make(map[any]any)
+// Invert returns a new map whose keys and values are swapped. V must
+// be comparable so it can serve as a map key. If multiple keys in m
+// share the same value, exactly one wins; which one is unspecified,
+// matching Go's own map iteration order.
+func Invert[K, V comparable](m map[K]V) map[V]K {
+	result := make(map[V]K, len(m))
 	for k, v := range m {
 		result[v] = k
 	}
 	return result
 }
 
-// Recursive enables recursive operation on nested maps
-func Recursive[K comparable, V any]() MapOption {
-	return recursiveOption[K, V]{}
-}
-
-type recursiveOption[K comparable, V any] struct{}
-
-func (o recursiveOption[K, V]) Apply(m map[any]any) map[any]any {
-	// This is a flag option - actual work is done in applyWithRecursive
-	return m
-}
-
-// applyWithRecursive applies an operation with optional recursive behavior
-func applyWithRecursive(opt MapOption, m map[any]any, recursive bool) map[any]any {
-	if !recursive {
-		return opt.Apply(m)
+// Merge returns a new map containing the union of all provided maps.
+// For keys present in more than one map, the value from the last map
+// containing the key wins.
+func Merge[K comparable, V any](maps ...map[K]V) map[K]V {
+	total := 0
+	for _, m := range maps {
+		total += len(m)
 	}
-
-	// Apply recursively
-	result := opt.Apply(m)
-	
-	// Process nested maps
-	for k, v := range result {
-		if nestedMap, ok := v.(map[string]any); ok {
-			// Convert to map[any]any for processing
-			anyNestedMap := make(map[any]any)
-			for nk, nv := range nestedMap {
-				anyNestedMap[any(nk)] = any(nv)
-			}
-			
-			// Apply operation recursively
-			processedNested := applyWithRecursive(opt, anyNestedMap, true)
-			
-			// Convert back to map[string]any
-			convertedNested := make(map[string]any)
-			for nk, nv := range processedNested {
-				if strKey, ok := nk.(string); ok {
-					convertedNested[strKey] = nv
-				}
-			}
-			
-			result[k] = convertedNested
-		} else if nestedMap, ok := v.(map[any]any); ok {
-			// Handle map[any]any directly
-			result[k] = applyWithRecursive(opt, nestedMap, true)
-		}
-	}
-	
-	return result
-}
-
-// =============================================================================
-// GetKeys
-// =============================================================================
-
-// GetKeys extracts keys from a map with optional filtering and sorting
-func GetKeys[K comparable, V any](m map[K]V, opts ...KeysOption) []K {
-	// Convert map to any for processing
-	anyMap := make(map[any]any)
-	for k, v := range m {
-		anyMap[any(k)] = any(v)
-	}
-
-	// Get all keys initially
-	keys := make([]any, 0, len(anyMap))
-	for k := range anyMap {
-		keys = append(keys, k)
-	}
-
-	// Apply options
-	for _, opt := range opts {
-		keys = opt.Apply(anyMap, keys)
-	}
-
-	// Convert back to []K
-	result := make([]K, 0, len(keys))
-	for _, key := range keys {
-		if k, ok := key.(K); ok {
-			result = append(result, k)
-		}
-	}
-
-	return result
-}
-
-
-// Filter keeps keys matching the condition
-func Filter[K comparable, V any](fn func(K, V) bool) KeysOption {
-	return filterOption[K, V]{fn: fn}
-}
-
-type filterOption[K comparable, V any] struct {
-	fn func(K, V) bool
-}
-
-func (o filterOption[K, V]) Apply(m map[any]any, keys []any) []any {
-	var result []any
-	for _, key := range keys {
-		if k, ok := key.(K); ok {
-			if v, exists := m[key]; exists {
-				if val, ok := v.(V); ok {
-					if o.fn(k, val) {
-						result = append(result, key)
-					}
-				}
-			}
-		}
-	}
-	return result
-}
-
-// Omit excludes specified keys
-func Omit[K comparable](keys ...K) KeysOption {
-	return omitKeysFilterOption[K]{keys: keys}
-}
-
-type omitKeysFilterOption[K comparable] struct {
-	keys []K
-}
-
-func (o omitKeysFilterOption[K]) Apply(m map[any]any, keys []any) []any {
-	excluded := make(map[any]bool)
-	for _, key := range o.keys {
-		excluded[any(key)] = true
-	}
-
-	var result []any
-	for _, key := range keys {
-		if !excluded[key] {
-			result = append(result, key)
-		}
-	}
-	return result
-}
-
-// Sort sorts keys in ascending order using type-aware comparison.
-// Keys that share a supported ordered type (string, any integer, any
-// float, bool) are compared naturally for that type. Mixed-type or
-// unsupported-type keys fall back to lexicographic comparison of
-// their fmt "%v" representation for determinism.
-func Sort() KeysOption {
-	return sortKeysOption{}
-}
-
-type sortKeysOption struct{}
-
-func (o sortKeysOption) Apply(m map[any]any, keys []any) []any {
-	result := make([]any, len(keys))
-	copy(result, keys)
-	slices.SortFunc(result, compareAny)
-	return result
-}
-
-// SortDesc sorts keys in descending order using the same type-aware
-// comparison as Sort.
-func SortDesc() KeysOption {
-	return sortKeysDescOption{}
-}
-
-type sortKeysDescOption struct{}
-
-func (o sortKeysDescOption) Apply(m map[any]any, keys []any) []any {
-	result := make([]any, len(keys))
-	copy(result, keys)
-	slices.SortFunc(result, func(a, b any) int { return compareAny(b, a) })
-	return result
-}
-
-// =============================================================================
-// GetValue
-// =============================================================================
-
-// GetValue gets a value from a map and converts it to type V
-func GetValue[K comparable, V any](m map[K]V, key K) V {
-	if val, exists := m[key]; exists {
-		return val
-	}
-	var zero V
-	return zero
-}
-
-// =============================================================================
-// GetValueOr
-// =============================================================================
-
-// GetValueOr gets a value from a map or returns the default
-func GetValueOr[K comparable, V any](m map[K]V, key K, defaultValue V) V {
-	if val, exists := m[key]; exists {
-		return val
-	}
-	return defaultValue
-}
-
-// =============================================================================
-// GetValues
-// =============================================================================
-
-// GetValues gets multiple values by their keys
-func GetValues[K comparable, V any](m map[K]V, keys ...K) []V {
-	result := make([]V, 0, len(keys))
-	for _, key := range keys {
-		if val, exists := m[key]; exists {
-			result = append(result, val)
-		}
-	}
-	return result
-}
-
-// =============================================================================
-// MergeMaps
-// =============================================================================
-
-// MergeMaps combines multiple maps, with later values overriding earlier ones
-func MergeMaps[K comparable, V any](maps ...map[K]V) map[K]V {
-	result := make(map[K]V)
+	result := make(map[K]V, total)
 	for _, m := range maps {
 		for k, v := range m {
 			result[k] = v
@@ -456,33 +113,158 @@ func MergeMaps[K comparable, V any](maps ...map[K]V) map[K]V {
 	return result
 }
 
-// =============================================================================
-// MutateMap
-// =============================================================================
-
-// MutateMap applies modifications to an existing map
-func MutateMap[K comparable, V any](m map[K]V, opts ...MapOption) map[K]V {
-	// Convert to any map for processing
-	anyMap := make(map[any]any)
+// Filter returns a new map containing only the entries of m for which
+// pred returns true.
+func Filter[K comparable, V any](m map[K]V, pred func(K, V) bool) map[K]V {
+	result := make(map[K]V, len(m))
 	for k, v := range m {
-		anyMap[any(k)] = any(v)
-	}
-
-	// Apply options
-	for _, opt := range opts {
-		anyMap = opt.Apply(anyMap)
-	}
-
-	// Convert back to typed map
-	result := make(map[K]V)
-	for k, v := range anyMap {
-		if key, ok := k.(K); ok {
-			if val, ok := v.(V); ok {
-				result[key] = val
-			}
+		if pred(k, v) {
+			result[k] = v
 		}
 	}
-
 	return result
 }
 
+// clone is an internal helper — the stdlib maps.Clone exists in 1.21+
+// but allocating explicitly keeps our dependency surface at zero beyond
+// cmp, reflect, and slices.
+func clone[K comparable, V any](m map[K]V) map[K]V {
+	result := make(map[K]V, len(m))
+	for k, v := range m {
+		result[k] = v
+	}
+	return result
+}
+
+// =============================================================================
+// Map-shape operations (in place — mutate and return the same map)
+// =============================================================================
+
+// PickInPlace removes every entry from m whose key is not in keys, and
+// returns m for call-site chaining. If m is nil it is returned
+// unchanged.
+func PickInPlace[K comparable, V any](m map[K]V, keys ...K) map[K]V {
+	if m == nil {
+		return m
+	}
+	keep := make(map[K]struct{}, len(keys))
+	for _, k := range keys {
+		keep[k] = struct{}{}
+	}
+	for k := range m {
+		if _, ok := keep[k]; !ok {
+			delete(m, k)
+		}
+	}
+	return m
+}
+
+// OmitInPlace deletes the specified keys from m in place and returns m.
+// Missing keys are silently ignored. If m is nil it is returned
+// unchanged.
+func OmitInPlace[K comparable, V any](m map[K]V, keys ...K) map[K]V {
+	for _, k := range keys {
+		delete(m, k)
+	}
+	return m
+}
+
+// FilterInPlace removes entries from m for which pred returns false,
+// and returns m. The semantics are the inverse of stdlib
+// maps.DeleteFunc (which removes where the predicate is true) and match
+// the immutable Filter.
+func FilterInPlace[K comparable, V any](m map[K]V, pred func(K, V) bool) map[K]V {
+	for k, v := range m {
+		if !pred(k, v) {
+			delete(m, k)
+		}
+	}
+	return m
+}
+
+// =============================================================================
+// Key extraction
+// =============================================================================
+
+// Keys returns a slice containing every key of m in unspecified order.
+func Keys[K comparable, V any](m map[K]V) []K {
+	result := make([]K, 0, len(m))
+	for k := range m {
+		result = append(result, k)
+	}
+	return result
+}
+
+// SortedKeys returns the keys of m in ascending order, compared with
+// cmp.Compare. K must satisfy cmp.Ordered — strings, integer types,
+// and float types. NaN floats sort before any non-NaN value, matching
+// cmp.Compare's defined behavior.
+//
+// For key types that are comparable but not cmp.Ordered (bool, custom
+// structs, pointers), use SortedKeysFunc.
+func SortedKeys[K cmp.Ordered, V any](m map[K]V) []K {
+	result := Keys(m)
+	slices.Sort(result)
+	return result
+}
+
+// SortedKeysDesc returns the keys of m in descending order.
+func SortedKeysDesc[K cmp.Ordered, V any](m map[K]V) []K {
+	result := Keys(m)
+	slices.SortFunc(result, func(a, b K) int { return cmp.Compare(b, a) })
+	return result
+}
+
+// SortedKeysFunc returns the keys of m sorted by the supplied
+// comparator, which must return -1/0/+1 as a<b / a==b / a>b.
+func SortedKeysFunc[K comparable, V any](m map[K]V, cmpFn func(a, b K) int) []K {
+	result := Keys(m)
+	slices.SortFunc(result, cmpFn)
+	return result
+}
+
+// FilteredKeys returns the keys of m for which pred returns true, in
+// unspecified order.
+func FilteredKeys[K comparable, V any](m map[K]V, pred func(K, V) bool) []K {
+	result := make([]K, 0, len(m))
+	for k, v := range m {
+		if pred(k, v) {
+			result = append(result, k)
+		}
+	}
+	return result
+}
+
+// =============================================================================
+// Value extraction
+// =============================================================================
+
+// Value returns m[key]. If key is absent the zero value of V is
+// returned. Equivalent to plain m[key]; provided for naming symmetry
+// with ValueOr and Values.
+func Value[K comparable, V any](m map[K]V, key K) V {
+	return m[key]
+}
+
+// ValueOr returns m[key] or def if key is absent.
+func ValueOr[K comparable, V any](m map[K]V, key K, def V) V {
+	if v, ok := m[key]; ok {
+		return v
+	}
+	return def
+}
+
+// Values returns the subset of m consisting of those keys that exist.
+// The return type preserves key↔value correspondence, making missing
+// keys detectable (compare len(result) to len(keys), or probe by key).
+// This replaces an earlier []V-returning variant that silently dropped
+// missing keys and destroyed positional correspondence.
+func Values[K comparable, V any](m map[K]V, keys ...K) map[K]V {
+	result := make(map[K]V, len(keys))
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			result[k] = v
+		}
+	}
+	return result
+}
