@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-05
+
+### Added
+
+- **`SortedEntries[K cmp.Ordered, V any](m) iter.Seq2[K, V]`** — iterator that yields map entries in ascending key order. Use it with Go's range-over-function syntax:
+  ```go
+  for k, v := range kv.SortedEntries(m) {
+      fmt.Println(k, "=", v)
+  }
+  ```
+- **`SortedEntriesDesc[K cmp.Ordered, V any](m) iter.Seq2[K, V]`** — same shape, descending order.
+- **`SortedEntriesFunc[K comparable, V any](m, cmpFn) iter.Seq2[K, V]`** — custom-comparator variant for key types that aren't `cmp.Ordered` (e.g. `bool`, custom structs).
+
+These functions are the correct way to express "iterate map entries in sorted order" in Go. Returning a new `map[K]V` with keys inserted in sorted order does NOT work — Go intentionally randomizes `for range` iteration over maps (each `range` statement picks a random starting bucket) precisely to prevent code from depending on insertion order. An iterator value, by contrast, is a function that yields entries on demand; the iterator can walk a pre-sorted key slice and look up values in order, producing deterministic traversal.
+
+Regression tests lock in:
+- Numeric ordering via the classic `1, 2, 10, 20, 100` case
+- Determinism across 10 consecutive iterations of the same map
+- `break` laziness (early exit stops the iterator without visiting the rest)
+- Nil and empty map tolerance
+- `SortedEntriesFunc` on `bool` keys (a comparable, non-ordered type)
+
+### Changed — non-breaking
+
+- **Go floor bumped from 1.21 to 1.23.** Required by the `iter.Seq2` type used by the new `SortedEntries*` functions. Every existing v0.2.x call site continues to work unchanged — this is an additive floor bump, not an API change.
+
 ## [0.2.0] — 2026-04-05
 
 ### Changed — BREAKING

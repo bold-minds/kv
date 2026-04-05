@@ -561,3 +561,146 @@ func Test_SortedKeysFunc_MatchesSortedKeys(t *testing.T) {
 		t.Errorf("SortedKeysFunc(cmp.Compare) = %v, SortedKeys = %v", b, a)
 	}
 }
+
+// =============================================================================
+// SortedEntries — iter.Seq2 ordered map iteration
+// =============================================================================
+
+// Test_SortedEntries_IntKeys is the primary regression for the numeric
+// ordering bug. The classic 1,2,10,20,100 case proves that SortedEntries
+// uses real numeric comparison (via SortedKeys → cmp.Compare), not
+// string-of-rune codepoint ordering or string lexicographic ordering.
+func Test_SortedEntries_IntKeys(t *testing.T) {
+	m := map[int]string{100: "d", 1: "a", 20: "e", 2: "b", 10: "c"}
+	var gotKeys []int
+	var gotVals []string
+	for k, v := range kv.SortedEntries(m) {
+		gotKeys = append(gotKeys, k)
+		gotVals = append(gotVals, v)
+	}
+	wantKeys := []int{1, 2, 10, 20, 100}
+	wantVals := []string{"a", "b", "c", "e", "d"}
+	if !reflect.DeepEqual(gotKeys, wantKeys) {
+		t.Errorf("SortedEntries keys = %v, want %v", gotKeys, wantKeys)
+	}
+	if !reflect.DeepEqual(gotVals, wantVals) {
+		t.Errorf("SortedEntries values = %v, want %v", gotVals, wantVals)
+	}
+}
+
+func Test_SortedEntries_StringKeys(t *testing.T) {
+	m := map[string]int{"charlie": 3, "alpha": 1, "bravo": 2}
+	var keys []string
+	for k := range kv.SortedEntries(m) {
+		keys = append(keys, k)
+	}
+	want := []string{"alpha", "bravo", "charlie"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("SortedEntries(strings) keys = %v, want %v", keys, want)
+	}
+}
+
+// Test_SortedEntries_OrderDeterministic explicitly addresses the
+// concern that motivated this function: Go maps randomize `for range`
+// iteration. This test ranges over SortedEntries ten times in a row
+// and verifies the order is identical every time. If the
+// implementation ever regresses into returning a map[K]V or otherwise
+// relies on map-iteration ordering, this test catches it.
+func Test_SortedEntries_OrderDeterministic(t *testing.T) {
+	m := map[string]int{"c": 3, "a": 1, "b": 2, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8}
+	var baseline []string
+	for k := range kv.SortedEntries(m) {
+		baseline = append(baseline, k)
+	}
+	for run := 1; run <= 10; run++ {
+		var got []string
+		for k := range kv.SortedEntries(m) {
+			got = append(got, k)
+		}
+		if !reflect.DeepEqual(got, baseline) {
+			t.Errorf("run %d: got %v, baseline %v — SortedEntries is non-deterministic", run, got, baseline)
+		}
+	}
+}
+
+func Test_SortedEntriesDesc(t *testing.T) {
+	m := map[int]string{1: "a", 2: "b", 3: "c", 10: "j"}
+	var keys []int
+	for k := range kv.SortedEntriesDesc(m) {
+		keys = append(keys, k)
+	}
+	want := []int{10, 3, 2, 1}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("SortedEntriesDesc keys = %v, want %v", keys, want)
+	}
+}
+
+// Test_SortedEntries_EarlyBreak verifies the iter.Seq2 laziness
+// contract: breaking out of the range loop must stop the iterator,
+// and subsequent iterations must be independent.
+func Test_SortedEntries_EarlyBreak(t *testing.T) {
+	m := map[int]int{1: 10, 2: 20, 3: 30, 4: 40, 5: 50}
+	var count int
+	for k := range kv.SortedEntries(m) {
+		count++
+		if k == 3 {
+			break
+		}
+	}
+	if count != 3 {
+		t.Errorf("early break at k=3 visited %d keys, want 3", count)
+	}
+
+	// Second iteration should restart cleanly from the beginning.
+	var keys []int
+	for k := range kv.SortedEntries(m) {
+		keys = append(keys, k)
+	}
+	if !reflect.DeepEqual(keys, []int{1, 2, 3, 4, 5}) {
+		t.Errorf("second iteration keys = %v, want [1 2 3 4 5]", keys)
+	}
+}
+
+func Test_SortedEntries_EmptyAndNil(t *testing.T) {
+	// Empty map: zero iterations.
+	count := 0
+	for range kv.SortedEntries(map[string]int{}) {
+		count++
+	}
+	if count != 0 {
+		t.Errorf("empty map visited %d keys, want 0", count)
+	}
+
+	// Nil map: also zero iterations, no panic.
+	var m map[string]int
+	count = 0
+	for range kv.SortedEntries(m) {
+		count++
+	}
+	if count != 0 {
+		t.Errorf("nil map visited %d keys, want 0", count)
+	}
+}
+
+func Test_SortedEntriesFunc(t *testing.T) {
+	// bool is comparable but not cmp.Ordered — SortedEntries wouldn't
+	// compile, so SortedEntriesFunc is the right escape hatch.
+	m := map[bool]string{true: "t", false: "f"}
+	boolCmp := func(a, b bool) int {
+		switch {
+		case a == b:
+			return 0
+		case !a:
+			return -1
+		default:
+			return 1
+		}
+	}
+	var keys []bool
+	for k := range kv.SortedEntriesFunc(m, boolCmp) {
+		keys = append(keys, k)
+	}
+	if !reflect.DeepEqual(keys, []bool{false, true}) {
+		t.Errorf("SortedEntriesFunc(bool) keys = %v, want [false true]", keys)
+	}
+}

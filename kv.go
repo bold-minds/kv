@@ -19,6 +19,7 @@ package kv
 
 import (
 	"cmp"
+	"iter"
 	"maps"
 	"reflect"
 	"slices"
@@ -230,6 +231,68 @@ func SortedKeysFunc[K comparable, V any](m map[K]V, cmpFn func(a, b K) int) []K 
 	result := Keys(m)
 	slices.SortFunc(result, cmpFn)
 	return result
+}
+
+// SortedEntries returns an iter.Seq2 that yields the entries of m in
+// ascending key order. It is the entry-level counterpart of
+// SortedKeys: where SortedKeys hands you a slice of keys you then have
+// to look up, SortedEntries lets you range over the map directly and
+// produces (key, value) pairs in sorted order.
+//
+//	for k, v := range kv.SortedEntries(m) {
+//	    fmt.Println(k, "=", v)
+//	}
+//
+// This function exists because Go maps cannot preserve key order by
+// themselves — the runtime intentionally randomizes `for range`
+// iteration over a map to prevent callers from depending on insertion
+// order. Returning a new "sorted" map[K]V would therefore be useless:
+// the sort effort would be destroyed by the next range. An iterator
+// is the correct representation for ordered map traversal.
+//
+// The returned iterator is lazy — it sorts the key list once per call
+// and yields entries as the caller consumes them, so a caller that
+// breaks out early pays only for the elements it actually read plus
+// the one-time key sort. Input is never mutated.
+//
+// Requires Go 1.23 or later for the iter.Seq2 type.
+func SortedEntries[K cmp.Ordered, V any](m map[K]V) iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		for _, k := range SortedKeys(m) {
+			if !yield(k, m[k]) {
+				return
+			}
+		}
+	}
+}
+
+// SortedEntriesDesc returns an iter.Seq2 that yields the entries of m
+// in descending key order. Semantics mirror SortedEntries; see that
+// function's documentation for the rationale behind returning an
+// iterator rather than a map.
+func SortedEntriesDesc[K cmp.Ordered, V any](m map[K]V) iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		for _, k := range SortedKeysDesc(m) {
+			if !yield(k, m[k]) {
+				return
+			}
+		}
+	}
+}
+
+// SortedEntriesFunc returns an iter.Seq2 that yields the entries of m
+// sorted by the supplied key comparator. Use this when K is not
+// cmp.Ordered (e.g. bool, custom structs) or when you need a non-
+// natural ordering. cmpFn must return -1/0/+1 as a<b / a==b / a>b
+// and must be non-nil.
+func SortedEntriesFunc[K comparable, V any](m map[K]V, cmpFn func(a, b K) int) iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		for _, k := range SortedKeysFunc(m, cmpFn) {
+			if !yield(k, m[k]) {
+				return
+			}
+		}
+	}
 }
 
 // FilteredKeys returns the keys of m for which pred returns true, in
