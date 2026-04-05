@@ -24,7 +24,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.21'
+          # kv v0.3.0 bumped the go.mod floor to 1.23 for iter.Seq2.
+          # Pin CI to a version >= 1.23; 'stable' picks the latest
+          # stable release at each run, which always satisfies the
+          # floor and keeps the matrix current.
+          go-version: 'stable'
 
       - name: Install dependencies
         run: go mod download
