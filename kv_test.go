@@ -226,6 +226,20 @@ func Test_Merge_Empty(t *testing.T) {
 	}
 }
 
+// Merge must tolerate nil maps mixed with real ones — iterating a nil
+// map is zero-iter, so the real maps should pass through unchanged.
+func Test_Merge_NilInterleaved(t *testing.T) {
+	var nilMap map[string]int
+	a := map[string]int{"a": 1}
+	c := map[string]int{"c": 3}
+
+	got := kv.Merge(a, nilMap, c, nilMap)
+	want := map[string]int{"a": 1, "c": 3}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Merge(real,nil,real,nil) = %v, want %v", got, want)
+	}
+}
+
 // =============================================================================
 // Filter
 // =============================================================================
@@ -272,6 +286,24 @@ func Test_OmitInPlace(t *testing.T) {
 	want := map[string]int{"a": 1, "c": 3}
 	if !reflect.DeepEqual(m, want) {
 		t.Errorf("OmitInPlace result = %v, want %v", m, want)
+	}
+}
+
+// The three *InPlace variants must all survive a nil map. PickInPlace
+// has an explicit guard; OmitInPlace and FilterInPlace rely on
+// delete(nil, k) being a legal no-op and nil-map range being empty.
+// These tests pin that behavior so a future refactor can't regress it.
+func Test_InPlace_NilMap(t *testing.T) {
+	var nilMap map[string]int
+
+	if g := kv.PickInPlace(nilMap, "a"); g != nil {
+		t.Errorf("PickInPlace(nil) = %v, want nil", g)
+	}
+	if g := kv.OmitInPlace(nilMap, "a"); g != nil {
+		t.Errorf("OmitInPlace(nil) = %v, want nil", g)
+	}
+	if g := kv.FilterInPlace(nilMap, func(string, int) bool { return true }); g != nil {
+		t.Errorf("FilterInPlace(nil) = %v, want nil", g)
 	}
 }
 
@@ -360,6 +392,25 @@ func Test_SortedKeys_Uint(t *testing.T) {
 	}
 }
 
+// SortedKeysDesc reverses cmp.Compare, so NaN — which cmp.Compare treats
+// as less than every non-NaN value — ends up at the tail of the descending
+// result. This is the documented asymmetry with Test_SortedKeys_FloatNaN.
+func Test_SortedKeysDesc_FloatNaN(t *testing.T) {
+	nan := math.NaN()
+	m := map[float64]string{3.14: "pi", nan: "nan", 1.41: "s"}
+	got := kv.SortedKeysDesc(m)
+
+	if len(got) != 3 {
+		t.Fatalf("SortedKeysDesc with NaN: len = %d, want 3", len(got))
+	}
+	if got[0] != 3.14 || got[1] != 1.41 {
+		t.Errorf("SortedKeysDesc with NaN: head = %v, want [3.14 1.41]", got[:2])
+	}
+	if !math.IsNaN(got[2]) {
+		t.Errorf("SortedKeysDesc with NaN: got[2] = %v, want NaN last", got[2])
+	}
+}
+
 func Test_SortedKeysDesc_Int(t *testing.T) {
 	m := map[int]string{100: "d", 1: "a", 20: "e", 2: "b", 10: "c"}
 	got := kv.SortedKeysDesc(m)
@@ -400,19 +451,8 @@ func Test_FilteredKeys(t *testing.T) {
 }
 
 // =============================================================================
-// Value / ValueOr / Values
+// ValueOr / Values
 // =============================================================================
-
-func Test_Value(t *testing.T) {
-	m := map[string]int{"a": 1, "b": 2}
-
-	if got := kv.Value(m, "a"); got != 1 {
-		t.Errorf("Value(a) = %d, want 1", got)
-	}
-	if got := kv.Value(m, "missing"); got != 0 {
-		t.Errorf("Value(missing) = %d, want 0", got)
-	}
-}
 
 func Test_ValueOr(t *testing.T) {
 	m := map[string]int{"a": 1}
@@ -481,9 +521,6 @@ func Test_Nil_Maps(t *testing.T) {
 	}
 	if g := kv.FilteredKeys(nilMap, func(string, int) bool { return true }); len(g) != 0 {
 		t.Errorf("FilteredKeys(nil) = %v", g)
-	}
-	if g := kv.Value(nilMap, "a"); g != 0 {
-		t.Errorf("Value(nil) = %v", g)
 	}
 	if g := kv.ValueOr(nilMap, "a", 42); g != 42 {
 		t.Errorf("ValueOr(nil) = %v, want 42", g)

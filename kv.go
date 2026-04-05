@@ -19,6 +19,7 @@ package kv
 
 import (
 	"cmp"
+	"maps"
 	"reflect"
 	"slices"
 )
@@ -46,7 +47,7 @@ func Pick[K comparable, V any](m map[K]V, keys ...K) map[K]V {
 // present in m have no effect.
 func Omit[K comparable, V any](m map[K]V, keys ...K) map[K]V {
 	if len(keys) == 0 {
-		return clone(m)
+		return maps.Clone(m)
 	}
 	excluded := make(map[K]struct{}, len(keys))
 	for _, k := range keys {
@@ -67,9 +68,14 @@ func Omit[K comparable, V any](m map[K]V, keys ...K) map[K]V {
 // such as slices, maps, or structs containing them. The cost is
 // O(len(m) × len(values)); for large maps with many exclusions, prefer
 // Filter with a purpose-built predicate.
+//
+// NaN float values cannot be excluded via OmitValues because
+// reflect.DeepEqual delegates to == for floats and NaN != NaN. If you
+// need to drop NaN-valued entries, use Filter with an explicit
+// math.IsNaN check.
 func OmitValues[K comparable, V any](m map[K]V, values ...V) map[K]V {
 	if len(values) == 0 {
-		return clone(m)
+		return maps.Clone(m)
 	}
 	result := make(map[K]V, len(m))
 entries:
@@ -88,6 +94,13 @@ entries:
 // be comparable so it can serve as a map key. If multiple keys in m
 // share the same value, exactly one wins; which one is unspecified,
 // matching Go's own map iteration order.
+//
+// Since Go 1.20 the `any` type satisfies `comparable`, so Invert will
+// compile with V = any. At runtime, however, inserting an incomparable
+// dynamic value (slice, map, function, or a struct containing any of
+// these) as a map key panics with "hash of unhashable type". If V is
+// an interface type, the caller must ensure all dynamic values are
+// hashable.
 func Invert[K, V comparable](m map[K]V) map[V]K {
 	result := make(map[V]K, len(m))
 	for k, v := range m {
@@ -121,17 +134,6 @@ func Filter[K comparable, V any](m map[K]V, pred func(K, V) bool) map[K]V {
 		if pred(k, v) {
 			result[k] = v
 		}
-	}
-	return result
-}
-
-// clone is an internal helper — the stdlib maps.Clone exists in 1.21+
-// but allocating explicitly keeps our dependency surface at zero beyond
-// cmp, reflect, and slices.
-func clone[K comparable, V any](m map[K]V) map[K]V {
-	result := make(map[K]V, len(m))
-	for k, v := range m {
-		result[k] = v
 	}
 	return result
 }
@@ -209,6 +211,12 @@ func SortedKeys[K cmp.Ordered, V any](m map[K]V) []K {
 }
 
 // SortedKeysDesc returns the keys of m in descending order.
+//
+// NaN handling is asymmetric with SortedKeys: because cmp.Compare treats
+// NaN as less than every non-NaN value, reversing the comparator places
+// NaN keys at the tail of the returned slice (SortedKeys places them at
+// the head). If you need a different NaN placement, use SortedKeysFunc
+// with a custom comparator.
 func SortedKeysDesc[K cmp.Ordered, V any](m map[K]V) []K {
 	result := Keys(m)
 	slices.SortFunc(result, func(a, b K) int { return cmp.Compare(b, a) })
@@ -216,7 +224,8 @@ func SortedKeysDesc[K cmp.Ordered, V any](m map[K]V) []K {
 }
 
 // SortedKeysFunc returns the keys of m sorted by the supplied
-// comparator, which must return -1/0/+1 as a<b / a==b / a>b.
+// comparator, which must return -1/0/+1 as a<b / a==b / a>b. cmpFn
+// must be non-nil; passing nil will panic via slices.SortFunc.
 func SortedKeysFunc[K comparable, V any](m map[K]V, cmpFn func(a, b K) int) []K {
 	result := Keys(m)
 	slices.SortFunc(result, cmpFn)
@@ -239,13 +248,6 @@ func FilteredKeys[K comparable, V any](m map[K]V, pred func(K, V) bool) []K {
 // Value extraction
 // =============================================================================
 
-// Value returns m[key]. If key is absent the zero value of V is
-// returned. Equivalent to plain m[key]; provided for naming symmetry
-// with ValueOr and Values.
-func Value[K comparable, V any](m map[K]V, key K) V {
-	return m[key]
-}
-
 // ValueOr returns m[key] or def if key is absent.
 func ValueOr[K comparable, V any](m map[K]V, key K, def V) V {
 	if v, ok := m[key]; ok {
@@ -257,14 +259,12 @@ func ValueOr[K comparable, V any](m map[K]V, key K, def V) V {
 // Values returns the subset of m consisting of those keys that exist.
 // The return type preserves key↔value correspondence, making missing
 // keys detectable (compare len(result) to len(keys), or probe by key).
-// This replaces an earlier []V-returning variant that silently dropped
-// missing keys and destroyed positional correspondence.
+//
+// This is exactly equivalent to Pick and is provided as a naming
+// alternative for call sites where "Values(config, required...)" reads
+// more naturally than "Pick(config, required...)". It replaces an
+// earlier []V-returning variant that silently dropped missing keys and
+// destroyed positional correspondence.
 func Values[K comparable, V any](m map[K]V, keys ...K) map[K]V {
-	result := make(map[K]V, len(keys))
-	for _, k := range keys {
-		if v, ok := m[k]; ok {
-			result[k] = v
-		}
-	}
-	return result
+	return Pick(m, keys...)
 }

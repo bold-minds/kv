@@ -116,3 +116,95 @@ func benchInvert(b *testing.B, n int) {
 		_ = kv.Invert(m)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// OmitValues — the reflect.DeepEqual hot loop. This is the one operation
+// where per-entry cost is non-trivial, so it matters most for tuning.
+// -----------------------------------------------------------------------------
+
+func BenchmarkOmitValues_10(b *testing.B)   { benchOmitValues(b, 10) }
+func BenchmarkOmitValues_1k(b *testing.B)   { benchOmitValues(b, 1000) }
+func BenchmarkOmitValues_100k(b *testing.B) { benchOmitValues(b, 100_000) }
+
+func benchOmitValues(b *testing.B, n int) {
+	m := buildStringIntMap(n)
+	// Exclude a handful of values to exercise the inner loop.
+	vals := []int{0, 1, 2, 3}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = kv.OmitValues(m, vals...)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Filter
+// -----------------------------------------------------------------------------
+
+func BenchmarkFilter_10(b *testing.B)   { benchFilter(b, 10) }
+func BenchmarkFilter_1k(b *testing.B)   { benchFilter(b, 1000) }
+func BenchmarkFilter_100k(b *testing.B) { benchFilter(b, 100_000) }
+
+func benchFilter(b *testing.B, n int) {
+	m := buildStringIntMap(n)
+	pred := func(_ string, v int) bool { return v%2 == 0 }
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = kv.Filter(m, pred)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// In-place variants — should allocate substantially less than their
+// immutable counterparts. Each iteration rebuilds the source map so
+// mutation does not compound across iterations.
+// -----------------------------------------------------------------------------
+
+func BenchmarkPickInPlace_1k(b *testing.B)   { benchPickInPlace(b, 1000) }
+func BenchmarkPickInPlace_100k(b *testing.B) { benchPickInPlace(b, 100_000) }
+
+func benchPickInPlace(b *testing.B, n int) {
+	keys := make([]string, 0, n/2)
+	for i := 0; i < n/2; i++ {
+		keys = append(keys, "key"+strconv.Itoa(i))
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		m := buildStringIntMap(n)
+		b.StartTimer()
+		_ = kv.PickInPlace(m, keys...)
+	}
+}
+
+func BenchmarkOmitInPlace_1k(b *testing.B)   { benchOmitInPlace(b, 1000) }
+func BenchmarkOmitInPlace_100k(b *testing.B) { benchOmitInPlace(b, 100_000) }
+
+func benchOmitInPlace(b *testing.B, n int) {
+	keys := []string{"key0", "key1", "key2"}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		m := buildStringIntMap(n)
+		b.StartTimer()
+		_ = kv.OmitInPlace(m, keys...)
+	}
+}
+
+func BenchmarkFilterInPlace_1k(b *testing.B)   { benchFilterInPlace(b, 1000) }
+func BenchmarkFilterInPlace_100k(b *testing.B) { benchFilterInPlace(b, 100_000) }
+
+func benchFilterInPlace(b *testing.B, n int) {
+	pred := func(_ string, v int) bool { return v%2 == 0 }
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		m := buildStringIntMap(n)
+		b.StartTimer()
+		_ = kv.FilterInPlace(m, pred)
+	}
+}
