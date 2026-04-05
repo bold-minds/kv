@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-05
+
 ### Changed — BREAKING
 This release replaces the 0.1.0 option-combinator API with plain generic
 functions. Every public name changed. 0.1.0 was published for less than a day
