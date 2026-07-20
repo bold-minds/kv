@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           # kv v0.3.0 bumped the go.mod floor to 1.23 for iter.Seq2.
           # Pin CI to a version >= 1.23; 'stable' picks the latest
